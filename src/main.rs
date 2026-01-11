@@ -555,9 +555,11 @@ struct RatedProxy {
     fail_count: u32,
     last_used: u64,
     proxy_type: ProxyType,
+    // Phase 3: Domain-specific success/failure
+    domain_stats: HashMap<String, (u32, u32)>, // domain -> (success, fail)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 enum ProxyType {
     Http,
     Socks5,
@@ -576,16 +578,27 @@ impl RatedProxy {
                 .unwrap()
                 .as_secs(),
             proxy_type,
+            domain_stats: HashMap::new(),
         }
     }
     
     fn score(&self) -> u64 {
         // Higher score = better proxy
-        // Fast speed, high success, low fail = good
         let speed_score = 10000_u64.saturating_sub(self.speed_ms);
         let success_score = self.success_count as u64 * 100;
         let fail_penalty = self.fail_count as u64 * 500;
         speed_score + success_score - fail_penalty.min(speed_score + success_score)
+    }
+
+    fn domain_score(&self, domain: &str) -> u64 {
+        let base = self.score();
+        if let Some((s, f)) = self.domain_stats.get(domain) {
+            let domain_success = *s as u64 * 200;
+            let domain_fail = *f as u64 * 1000;
+            (base + domain_success).saturating_sub(domain_fail)
+        } else {
+            base
+        }
     }
 }
 
@@ -687,8 +700,76 @@ impl ProxyBlacklist {
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// SMART PROXY POOL (Phase 3)
+// ═══════════════════════════════════════════════════════════════════════════════
+struct SmartProxyPool {
+    proxies: RwLock<Vec<RatedProxy>>,
+}
+
+impl SmartProxyPool {
+    fn new(proxies: Vec<RatedProxy>) -> Self {
+        Self {
+            proxies: RwLock::new(proxies),
+        }
+    }
+    
+    async fn get_best_for(&self, domain: &str) -> Option<RatedProxy> {
+        let mut proxies = self.proxies.write().await;
+        if proxies.is_empty() {
+            return None;
+        }
+        
+        // Advanced selection: tournament selection
+        let mut rng = rand::thread_rng();
+        let mut best_idx = 0;
+        let mut best_score = 0;
+        
+        let sample_size = 15.min(proxies.len());
+        for _ in 0..sample_size {
+            let idx = rng.gen_range(0..proxies.len());
+            let score = proxies[idx].domain_score(domain);
+            if score >= best_score {
+                best_score = score;
+                best_idx = idx;
+            }
+        }
+        
+        Some(proxies.remove(best_idx))
+    }
+    
+    async fn return_proxy(&self, mut proxy: RatedProxy, success: bool, domain: Option<&str>) {
+        if let Some(dom) = domain {
+            let stats = proxy.domain_stats.entry(dom.to_string()).or_insert((0, 0));
+            if success {
+                stats.0 += 1;
+                proxy.success_count += 1;
+            } else {
+                stats.1 += 1;
+                proxy.fail_count += 1;
+            }
+        }
+        
+        proxy.last_used = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+            
+        self.proxies.write().await.push(proxy);
+    }
+    
+    async fn add_bulk(&self, new_proxies: Vec<RatedProxy>) {
+        let mut proxies = self.proxies.write().await;
+        proxies.extend(new_proxies);
+    }
+    
+    async fn len(&self) -> usize {
+        self.proxies.read().await.len()
+    }
+}
+
 struct AppState {
-    proxies: RwLock<BinaryHeap<RatedProxy>>,
+    proxies: Arc<SmartProxyPool>,
     burned_ips: RwLock<HashSet<String>>,
     daily_ips: RwLock<HashSet<String>>,
     blacklist: Arc<ProxyBlacklist>,
@@ -847,8 +928,8 @@ fn get_gold_proxies_path() -> PathBuf {
 // ═══════════════════════════════════════════════════════════════════════════════
 // PERSISTENT CACHE
 // ═══════════════════════════════════════════════════════════════════════════════
-async fn load_gold_proxies() -> BinaryHeap<RatedProxy> {
-    let mut heap = BinaryHeap::new();
+async fn load_gold_proxies() -> Vec<RatedProxy> {
+    let mut proxies = Vec::new();
     let path = get_gold_proxies_path();
     
     if let Ok(file) = File::open(&path).await {
@@ -864,16 +945,16 @@ async fn load_gold_proxies() -> BinaryHeap<RatedProxy> {
                 
                 // Keep proxies from last 24 hours
                 if now - proxy.last_used < 86400 {
-                    heap.push(proxy);
+                    proxies.push(proxy);
                 }
             }
         }
     }
     
-    if !heap.is_empty() {
-        println!("{}", format!("[✓] Loaded {} gold proxies", heap.len()).green());
+    if !proxies.is_empty() {
+        println!("{}", format!("[✓] Loaded {} gold proxies", proxies.len()).green());
     }
-    heap
+    proxies
 }
 
 async fn save_gold_proxy(proxy: &RatedProxy) -> std::io::Result<()> {
@@ -1084,126 +1165,93 @@ async fn start_tor_pool(instances: usize) -> Result<Vec<u16>> {
 // ═══════════════════════════════════════════════════════════════════════════════
 // FETCH PROXIES
 // ═══════════════════════════════════════════════════════════════════════════════
-async fn fetch_and_validate_proxies(stats: Arc<Stats>, quiet: bool) -> BinaryHeap<RatedProxy> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(25))
-        .build()
-        .unwrap();
-    
-    if !quiet {
-        println!("{}", "[*] Downloading proxies...".yellow());
-    }
-    
-    let mut handles = Vec::new();
-    
-    for &url in PROXY_SOURCES {
-        let client = client.clone();
-        let is_socks5 = url.contains("socks5");
-        let is_socks4 = url.contains("socks4");
-        
-        handles.push(tokio::spawn(async move {
-            match client.get(url).send().await {
-                Ok(resp) => {
-                    if let Ok(text) = resp.text().await {
-                        let ptype = if is_socks5 {
-                            ProxyType::Socks5
-                        } else if is_socks4 {
-                            ProxyType::Socks4
-                        } else {
-                            ProxyType::Http
-                        };
-                        PROXY_REGEX.find_iter(&text)
-                            .map(|m| (m.as_str().to_string(), ptype.clone()))
-                            .collect::<Vec<_>>()
-                    } else { 
-                        Vec::new() 
-                    }
-                }
-                Err(_) => Vec::new(),
-            }
-        }));
-    }
+async fn fetch_and_validate_proxies(
+    stats: Arc<Stats>,
+    quiet: bool,
+) -> Vec<RatedProxy> {
+    let urls = vec![
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
+        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://www.proxyscan.io/download?type=http",
+    ];
     
     let mut all_proxies = Vec::new();
-    for handle in handles {
-        if let Ok(proxies) = handle.await {
-            all_proxies.extend(proxies);
+    for url in urls {
+        match reqwest::get(url).await {
+            Ok(resp) => {
+                if let Ok(text) = resp.text().await {
+                    for line in text.lines() {
+                        if !line.trim().is_empty() {
+                            all_proxies.push((line.trim().to_string(), ProxyType::Http));
+                        }
+                    }
+                }
+            }
+            Err(_) => {}
         }
     }
     
-    // Deduplicate by address
+    // Deduplicate
     let mut seen = HashSet::new();
     let unique: Vec<(String, ProxyType)> = all_proxies
         .into_iter()
         .filter(|(addr, _)| seen.insert(addr.clone()))
         .collect();
-    
-    if !quiet {
-        println!("{}", format!("[*] {} unique. Validating...", unique.len()).yellow());
-    }
-    
-    let mut validated_heap = BinaryHeap::new();
-    
-    for chunk in unique.chunks(VALIDATION_BATCH_SIZE) {
-        let validated = validate_proxies_batch(chunk.to_vec()).await;
         
-        for proxy in validated {
+    let mut validated = Vec::new();
+    for (addr, ptype) in unique {
+        if let Some(proxy) = validate_proxy(&addr, ptype).await {
             stats.validated.fetch_add(1, Ordering::Relaxed);
-            
-            if proxy.speed_ms < MIN_GOLD_SPEED_MS {
-                let _ = save_gold_proxy(&proxy).await;
-                stats.gold_saved.fetch_add(1, Ordering::Relaxed);
-            }
-            
-            validated_heap.push(proxy);
-            
-            if validated_heap.len() >= MAX_PROXIES_CACHE {
-                break;
-            }
+            validated.push(proxy);
         }
     }
-    
-    if !quiet {
-        println!("{}", format!("[✓] {} validated", validated_heap.len()).green());
-    }
-    validated_heap
+    validated
 }
 
 /// Fetch and validate proxies with configurable thread count
-async fn fetch_and_validate_proxies_threaded(stats: Arc<Stats>, quiet: bool, threads: usize) -> BinaryHeap<RatedProxy> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(25))
-        .build()
-        .unwrap();
+async fn fetch_and_validate_proxies_threaded(
+    threads: usize,
+    stats: Arc<Stats>,
+    quiet: bool,
+) -> Vec<RatedProxy> {
+    // Phase 4: Use specialized sources if detected (Placeholder for future)
     
-    if !quiet {
-        println!("{}", format!("[*] Downloading proxies (using {} validation threads)...", threads).yellow());
-    }
+    let sources = vec![
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=all",
+        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=all",
+        "https://www.proxy-list.download/api/v1/get?type=http",
+        "https://www.proxy-list.download/api/v1/get?type=socks4",
+        "https://www.proxy-list.download/api/v1/get?type=socks5",
+        "https://spys.me/proxy.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
+        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt",
+        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
+    ];
     
     let mut handles = Vec::new();
-    
-    for &url in PROXY_SOURCES {
-        let client = client.clone();
-        let is_socks5 = url.contains("socks5");
-        let is_socks4 = url.contains("socks4");
-        
+    for url in sources {
         handles.push(tokio::spawn(async move {
-            match client.get(url).send().await {
+            match reqwest::get(url).await {
                 Ok(resp) => {
                     if let Ok(text) = resp.text().await {
-                        let re = Regex::new(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}").unwrap();
-                        let ptype = if is_socks5 {
+                        let ptype = if url.contains("socks5") {
                             ProxyType::Socks5
-                        } else if is_socks4 {
+                        } else if url.contains("socks4") {
                             ProxyType::Socks4
                         } else {
                             ProxyType::Http
                         };
-                        re.find_iter(&text)
-                            .map(|m| (m.as_str().to_string(), ptype.clone()))
-                            .collect::<Vec<_>>()
-                    } else { 
-                        Vec::new() 
+                        
+                        text.lines()
+                            .filter(|l| !l.trim().is_empty())
+                            .map(|l| (l.trim().to_string(), ptype))
+                            .collect::<Vec<(String, ProxyType)>>()
+                    } else {
+                        Vec::new()
                     }
                 }
                 Err(_) => Vec::new(),
@@ -1241,7 +1289,7 @@ async fn fetch_and_validate_proxies_threaded(stats: Arc<Stats>, quiet: bool, thr
         None
     };
     
-    let mut validated_heap = BinaryHeap::new();
+    let mut validated_list = Vec::new();
     let semaphore = Arc::new(Semaphore::new(threads));
     let validated_count = Arc::new(AtomicU64::new(0));
     
@@ -1272,9 +1320,9 @@ async fn fetch_and_validate_proxies_threaded(stats: Arc<Stats>, quiet: bool, thr
                     stats.gold_saved.fetch_add(1, Ordering::Relaxed);
                 }
                 
-                validated_heap.push(proxy);
+                validated_list.push(proxy);
                 
-                if validated_heap.len() >= MAX_PROXIES_CACHE {
+                if validated_list.len() >= MAX_PROXIES_CACHE {
                     break;
                 }
             }
@@ -1282,9 +1330,9 @@ async fn fetch_and_validate_proxies_threaded(stats: Arc<Stats>, quiet: bool, thr
     }
     
     if !quiet {
-        println!("{}", format!("[✓] {} validated", validated_heap.len()).green());
+        println!("{}", format!("[✓] {} validated", validated_list.len()).green());
     }
-    validated_heap
+    validated_list
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1339,7 +1387,7 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
         // 60% Tor, 40% Proxy (when Tor available)
         let use_tor = !state.tor_ports.is_empty() && rng.gen_bool(0.60);
         
-        let (client, proxy_addr) = if use_tor {
+        let (client, mut proxy_obj_opt, proxy_addr) = if use_tor {
             let port = state.tor_ports[rng.gen_range(0..state.tor_ports.len())];
             let proxy = match reqwest::Proxy::all(format!("socks5://127.0.0.1:{}", port)) {
                 Ok(p) => p,
@@ -1353,16 +1401,14 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                     Ok(c) => c,
                     Err(_) => continue,
             };
-            (c, format!("tor:{}", port))
+            (c, None, format!("tor:{}", port))
         } else {
-            let proxy_info = {
-                let mut proxies = state.proxies.write().await;
-                proxies.pop()
-            };
+            let proxy_info = state.proxies.get_best_for(&state.target_url).await;
             
             match proxy_info {
-                Some(mut proxy) => {
+                Some(proxy) => {
                     if state.burned_ips.read().await.contains(&proxy.addr) {
+                        state.proxies.return_proxy(proxy, false, None).await;
                         continue;
                     }
                     
@@ -1372,29 +1418,28 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                         ProxyType::Socks4 => format!("socks4://{}", &proxy.addr),
                     };
                     
-                    let proxy_obj = match reqwest::Proxy::all(&proxy_url) {
+                    let proxy_req_obj = match reqwest::Proxy::all(&proxy_url) {
                         Ok(p) => p,
-                        Err(_) => continue,
+                        Err(_) => {
+                            state.proxies.return_proxy(proxy, false, None).await;
+                            continue;
+                        }
                     };
                     
                     let c = match reqwest::Client::builder()
-                        .proxy(proxy_obj)
+                        .proxy(proxy_req_obj)
                         .timeout(Duration::from_secs(state.config.timeout_sec))
                         .pool_max_idle_per_host(5)
                         .build() {
                             Ok(c) => c,
-                            Err(_) => continue,
+                            Err(_) => {
+                                state.proxies.return_proxy(proxy, false, None).await;
+                                continue;
+                            }
                     };
                     
                     let addr = proxy.addr.clone();
-                    proxy.success_count += 1;
-                    proxy.last_used = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_secs();
-                    state.proxies.write().await.push(proxy);
-                    
-                    (c, addr)
+                    (c, Some(proxy), addr)
                 }
                 None => continue,
             }
@@ -1433,7 +1478,9 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
         headers.insert("Accept-Language", ACCEPT_LANGUAGES[rng.gen_range(0..ACCEPT_LANGUAGES.len())].parse().unwrap());
         headers.insert("Upgrade-Insecure-Requests", "1".parse().unwrap());
         
-        match request_with_retry(&client, &state.target_url, headers.clone(), &state.stats).await {
+        let request_result = request_with_retry(&client, &state.target_url, headers.clone(), &state.stats).await;
+        
+        let success = match request_result {
             Ok(resp) => {
                 let status = resp.status().as_u16();
                 
@@ -1458,7 +1505,9 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                     }
                 }
                 
-                if (200..400).contains(&status) {
+                let is_success = (200..400).contains(&status);
+                
+                if is_success {
                     state.stats.impressions.fetch_add(1, Ordering::Relaxed);
                     
                     // Enhanced Ad Network Detection
@@ -1490,7 +1539,6 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                     
                     // Human behavior: Click simulation
                     let base_rate = state.config.click_rate;
-                    
                     let network = detect_ad_network(&state.target_url, &body_str);
                     let effective_click_rate = get_network_click_rate(network, base_rate);
                     
@@ -1508,10 +1556,20 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                 } else {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
                 }
+                is_success
             }
             Err(_) => {
                 state.stats.errors.fetch_add(1, Ordering::Relaxed);
+                false
             }
+        };
+
+        // Phase 3: Return proxy to pool with stats
+        if let Some(proxy) = proxy_obj_opt {
+            let domain = state.target_url.split('/')
+                .nth(2)
+                .unwrap_or("unknown");
+            state.proxies.return_proxy(proxy, success, Some(domain)).await;
         }
     }
 }
@@ -1550,7 +1608,7 @@ async fn monitor(state: Arc<AppState>, start: Instant) {
         let ctr = if i > 0 { (c as f64 / i as f64) * 100.0 } else { 0.0 };
         let err_rate = if i + e > 0 { (e as f64 / (i + e) as f64) * 100.0 } else { 0.0 };
         
-        let proxy_count = state.proxies.read().await.len();
+        let proxy_count = state.proxies.len().await;
         let tor_status = if state.tor_ports.is_empty() { "OFF" } else { "ON" };
         
         // Clear screen (works on Termux)
@@ -1851,7 +1909,7 @@ async fn main() -> Result<()> {
     
     // Load existing gold proxies and fetch new ones
     let mut gold_proxies = load_gold_proxies().await;
-    let new_proxies = fetch_and_validate_proxies_threaded(stats.clone(), args.quiet, validation_threads).await;
+    let new_proxies = fetch_and_validate_proxies_threaded(validation_threads, stats.clone(), args.quiet).await;
     
     for proxy in new_proxies {
         gold_proxies.push(proxy);
@@ -1872,7 +1930,7 @@ async fn main() -> Result<()> {
     
     // Create app state
     let state = Arc::new(AppState {
-        proxies: RwLock::new(gold_proxies),
+        proxies: Arc::new(SmartProxyPool::new(gold_proxies)),
         burned_ips: RwLock::new(HashSet::new()),
         daily_ips: RwLock::new(HashSet::new()),
         blacklist: blacklist.clone(),
@@ -1895,10 +1953,7 @@ async fn main() -> Result<()> {
                 break;
             }
             let new = fetch_and_validate_proxies(stats_refresh.clone(), quiet).await;
-            let mut proxies = state_refresh.proxies.write().await;
-            for proxy in new {
-                proxies.push(proxy);
-            }
+            state_refresh.proxies.add_bulk(new).await;
         }
     });
     
