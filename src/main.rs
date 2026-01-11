@@ -22,35 +22,12 @@ use rand::Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use anyhow::{Result, Context};
-use once_cell::sync::Lazy;
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// LAZY COMPILED REGEX (compile once, reuse everywhere)
-// ═══════════════════════════════════════════════════════════════════════════════
-static PROXY_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:\d{2,5}").unwrap()
-});
-
-static AADS_DATA_AA_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"data-aa=["']?(\d+)["']?"#).unwrap()
-});
-
-static AADS_URL_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"(?:https?:)?//ad\.a-ads\.com/\d+"#).unwrap()
-});
-
-static SRC_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"src\s*=\s*["']((?:https?:)?//[^"']+)["']"#).unwrap()
-});
-
-static HREF_REGEX: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r#"href\s*=\s*["'](https?://[^"']+)["']"#).unwrap()
-});
 
 // Progress bar styles
 use indicatif::{ProgressBar, ProgressStyle};
 
-// ═══════════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 // CLI ARGUMENTS
 // ═══════════════════════════════════════════════════════════════════════════════
 #[derive(Parser, Debug)]
@@ -869,6 +846,7 @@ fn detect_ad_network(url: &str, body: &str) -> Option<&'static str> {
     if url_lower.contains("popads.net") 
         || body_lower.contains("popads.net")
         || body_lower.contains("betteradsystem.com")
+        || body_lower.contains("data-cfasync=\"false\"")
         || (body_lower.contains("siteid") && body_lower.contains("minbid") && body_lower.contains("popundersperip"))
         || (body_lower.contains("cloudfront.net") && body_lower.contains("popunders"))
         || body_lower.contains("topmostlayer")
@@ -1387,7 +1365,7 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
         // 60% Tor, 40% Proxy (when Tor available)
         let use_tor = !state.tor_ports.is_empty() && rng.gen_bool(0.60);
         
-        let (client, mut proxy_obj_opt, proxy_addr) = if use_tor {
+        let (client, proxy_obj_opt, proxy_addr) = if use_tor {
             let port = state.tor_ports[rng.gen_range(0..state.tor_ports.len())];
             let proxy = match reqwest::Proxy::all(format!("socks5://127.0.0.1:{}", port)) {
                 Ok(p) => p,
@@ -1524,8 +1502,11 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                     }
                     
                     // Check for popunder triggers
-                    if body_str.contains("onclick") || body_str.contains("popunder") 
-                       || body_str.contains("window.open") || body_str.contains("popads") {
+                    // Check for popunder triggers (case-insensitive)
+                    let body_check = body_str.to_lowercase();
+                    if body_check.contains("onclick") || body_check.contains("popunder") 
+                       || body_check.contains("window.open") || body_check.contains("popads")
+                       || body_check.contains("cfasync") {
                         state.stats.popunder_triggers.fetch_add(1, Ordering::Relaxed);
                     }
                     
