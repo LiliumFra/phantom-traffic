@@ -47,6 +47,9 @@ static HREF_REGEX: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r#"href\s*=\s*["'](https?://[^"']+)["']"#).unwrap()
 });
 
+// Progress bar styles
+use indicatif::{ProgressBar, ProgressStyle};
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // CLI ARGUMENTS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1048,17 +1051,37 @@ async fn fetch_and_validate_proxies_threaded(stats: Arc<Stats>, quiet: bool, thr
         println!("{}", format!("[*] {} unique. Validating with {} threads...", unique.len(), threads).yellow());
     }
     
+    // Create progress bar
+    let pb = if !quiet {
+        let bar = ProgressBar::new(unique.len() as u64);
+        bar.set_style(ProgressStyle::default_bar()
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .unwrap()
+            .progress_chars("█▓░"));
+        Some(bar)
+    } else {
+        None
+    };
+    
     let mut validated_heap = BinaryHeap::new();
-    let semaphore = Arc::new(Semaphore::new(threads)); // Use configurable threads
+    let semaphore = Arc::new(Semaphore::new(threads));
+    let validated_count = Arc::new(AtomicU64::new(0));
     
     for chunk in unique.chunks(VALIDATION_BATCH_SIZE) {
         let mut chunk_handles = Vec::new();
         
         for (proxy, ptype) in chunk.to_vec() {
             let sem = semaphore.clone();
+            let pb_clone = pb.clone();
+            let count = validated_count.clone();
             chunk_handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
-                validate_proxy(&proxy, ptype).await
+                let result = validate_proxy(&proxy, ptype).await;
+                count.fetch_add(1, Ordering::Relaxed);
+                if let Some(ref bar) = pb_clone {
+                    bar.inc(1);
+                }
+                result
             }));
         }
         
