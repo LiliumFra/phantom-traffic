@@ -1,9 +1,9 @@
 [package]
 name = "icecold"
-version = "36.0.0"
+version = "37.0.0"
 edition = "2021"
-authors = ["IceCold Team"]
-description = "Ultra-optimized traffic bot for Termux/Android with AADS & Monetag support"
+authors = ["Phantom Traffic Team"]
+description = "Ultra-optimized traffic bot with human behavior simulation and anti-detection"
 
 # Optimizations for release builds
 [profile.release]

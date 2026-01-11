@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════════════════════════
-// ICE COLD v36 - RUST TURBO EDITION (Termux Compatible)
-// Ultra-optimized traffic generation bot for Android/Termux
-// With AADS & Monetag support
+// PHANTOM TRAFFIC v37 - RUST TURBO EDITION
+// Ultra-optimized traffic bot with human behavior simulation
+// 8 Ad Networks | Anti-Detection | Termux Native
 // ═══════════════════════════════════════════════════════════════════════════════
 
 use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
@@ -645,6 +645,116 @@ struct RuntimeConfig {
     timeout_sec: u64,
     refresh_mins: u64,
     quiet: bool,
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HUMAN BEHAVIOR SIMULATION
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Generate human-like delay with variance (not uniform distribution)
+fn human_delay(base_ms: u64) -> Duration {
+    let mut rng = rand::thread_rng();
+    // Log-normal distribution approximation for human timing
+    let variance: f64 = rng.gen_range(0.7..1.4);
+    let jitter: i64 = rng.gen_range(-300..300);
+    let adjusted = (base_ms as f64 * variance) as i64 + jitter;
+    Duration::from_millis(adjusted.max(500) as u64)
+}
+
+/// Simulate page dwell time (how long a user stays on page)
+fn simulate_dwell_time() -> Duration {
+    let mut rng = rand::thread_rng();
+    // Most users spend 5-20 seconds on ad pages
+    let base_seconds = rng.gen_range(5..20);
+    // Add some variance
+    let variance: f64 = rng.gen_range(0.8..1.3);
+    Duration::from_secs_f64(base_seconds as f64 * variance)
+}
+
+/// Simulate realistic scroll position for ad viewability
+fn simulate_scroll_position(page_height: u32) -> u32 {
+    let mut rng = rand::thread_rng();
+    // 70% of time scroll to middle, 30% deeper
+    if rng.gen_bool(0.7) {
+        rng.gen_range(100..page_height / 2)
+    } else {
+        rng.gen_range(page_height / 2..page_height.saturating_sub(100))
+    }
+}
+
+/// Generate organic click timing with human patterns
+fn organic_click_delay() -> Duration {
+    let mut rng = rand::thread_rng();
+    // Humans take 200-800ms to click after seeing something
+    let think_time = rng.gen_range(200..600);
+    let reaction_time = rng.gen_range(80..200);
+    Duration::from_millis(think_time + reaction_time)
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// AD NETWORK PATTERNS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Detect ad network type from URL or HTML content
+fn detect_ad_network(url: &str, body: &str) -> Option<&'static str> {
+    let url_lower = url.to_lowercase();
+    let body_lower = body.to_lowercase();
+    
+    // AADS (A-ADS crypto ads)
+    if url_lower.contains("a-ads.com") || body_lower.contains("data-aa=") {
+        return Some("aads");
+    }
+    
+    // Monetag (popunders)
+    if url_lower.contains("monetag") || body_lower.contains("surfrfrr") 
+        || body_lower.contains("alwingulla") || body_lower.contains("niphaumeenses") {
+        return Some("monetag");
+    }
+    
+    // PropellerAds
+    if url_lower.contains("propellerads") || url_lower.contains("propu.sh")
+        || body_lower.contains("propellerads") {
+        return Some("propellerads");
+    }
+    
+    // Adsterra
+    if url_lower.contains("adsterra") || body_lower.contains("adsterra.com") {
+        return Some("adsterra");
+    }
+    
+    // PopAds
+    if url_lower.contains("popads.net") || body_lower.contains("popads.net") {
+        return Some("popads");
+    }
+    
+    // ExoClick
+    if url_lower.contains("exoclick") || body_lower.contains("syndication.exoclick") {
+        return Some("exoclick");
+    }
+    
+    // HilltopAds
+    if url_lower.contains("hilltopads") || body_lower.contains("hilltopads") {
+        return Some("hilltopads");
+    }
+    
+    // TrafficStars
+    if url_lower.contains("trafficstars") || body_lower.contains("trafficstars") {
+        return Some("trafficstars");
+    }
+    
+    None
+}
+
+/// Calculate optimal click rate based on ad network
+fn get_network_click_rate(network: Option<&str>, base_rate: f32) -> f32 {
+    match network {
+        Some("aads") => base_rate * 0.8,  // Conservative for crypto ads
+        Some("monetag") => base_rate * 1.5,  // Boost for popunders
+        Some("propellerads") => base_rate * 1.2,
+        Some("popads") => base_rate * 1.4,
+        Some("exoclick") => base_rate * 1.1,
+        _ => base_rate,
+    }.min(0.20)  // Cap at 20%
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
