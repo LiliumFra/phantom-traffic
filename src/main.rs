@@ -722,8 +722,15 @@ fn detect_ad_network(url: &str, body: &str) -> Option<&'static str> {
         return Some("adsterra");
     }
     
-    // PopAds
-    if url_lower.contains("popads.net") || body_lower.contains("popads.net") {
+    // PopAds - Enhanced detection for obfuscated scripts
+    // Patterns: betteradsystem.com, cloudfront.net CDN, siteId+minBid+popundersPerIP
+    if url_lower.contains("popads.net") 
+        || body_lower.contains("popads.net")
+        || body_lower.contains("betteradsystem.com")
+        || (body_lower.contains("siteid") && body_lower.contains("minbid") && body_lower.contains("popundersperip"))
+        || (body_lower.contains("cloudfront.net") && body_lower.contains("popunders"))
+        || body_lower.contains("topmostlayer")
+        || (body_lower.contains("atob(") && body_lower.contains("delaybetween")) {
         return Some("popads");
     }
     
