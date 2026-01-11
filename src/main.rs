@@ -484,6 +484,67 @@ const ACCEPT_LANGUAGES: &[&str] = &[
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
+// ANTI-DETECTION: SEC-FETCH HEADERS & REFERER CHAINS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Realistic referer chains (simulates organic discovery)
+const GOOGLE_REFERERS: &[&str] = &[
+    "https://www.google.com/",
+    "https://www.google.com/search?q=dolar+blue+argentina",
+    "https://www.google.com/search?q=cotizacion+dolar+hoy",
+    "https://www.google.com/search?q=crypto+usdt+p2p",
+    "https://www.google.com.ar/",
+];
+
+const SOCIAL_REFERERS: &[&str] = &[
+    "https://www.facebook.com/",
+    "https://t.co/",
+    "https://www.reddit.com/",
+    "https://www.youtube.com/",
+];
+
+const DIRECT_REFERERS: &[&str] = &[
+    "",  // Direct visit (no referer)
+    "android-app://com.android.chrome/",
+];
+
+/// Select a realistic referer based on probability
+fn get_organic_referer() -> &'static str {
+    let mut rng = rand::thread_rng();
+    let roll: f32 = rng.gen();
+    
+    if roll < 0.45 {
+        // 45% from Google search
+        GOOGLE_REFERERS[rng.gen_range(0..GOOGLE_REFERERS.len())]
+    } else if roll < 0.65 {
+        // 20% from social media
+        SOCIAL_REFERERS[rng.gen_range(0..SOCIAL_REFERERS.len())]
+    } else {
+        // 35% direct visit
+        DIRECT_REFERERS[rng.gen_range(0..DIRECT_REFERERS.len())]
+    }
+}
+
+/// Get Sec-Fetch headers for Chrome (anti-detection)
+fn get_sec_fetch_headers_str(is_iframe: bool) -> [(&'static str, &'static str); 4] {
+    if is_iframe {
+        [
+            ("Sec-Fetch-Mode", "navigate"),
+            ("Sec-Fetch-Site", "cross-site"),
+            ("Sec-Fetch-Dest", "iframe"),
+            ("Sec-Fetch-User", ""),
+        ]
+    } else {
+        [
+            ("Sec-Fetch-Mode", "navigate"),
+            ("Sec-Fetch-Site", "none"),
+            ("Sec-Fetch-Dest", "document"),
+            ("Sec-Fetch-User", "?1"),
+        ]
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
 // DATA STRUCTURES
 // ═══════════════════════════════════════════════════════════════════════════════
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1342,46 +1403,35 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
         // Generate realistic fingerprint
         let profile = &PROFILES[rng.gen_range(0..PROFILES.len())];
         let chrome_major: u32 = rng.gen_range(120..127);
-        let chrome_build: u32 = rng.gen_range(1000..6000);
-        let chrome_patch: u32 = rng.gen_range(1..200);
         
-        let ua = profile.ua_template
-            .replacen("{}", &chrome_major.to_string(), 1)
-            .replacen("{}", &chrome_build.to_string(), 1)
-            .replacen("{}", &chrome_patch.to_string(), 1);
+        let referer = get_organic_referer();
         
-        let brands = profile.brands
-            .replacen("{}", &chrome_major.to_string(), 1)
-            .replacen("{}", &chrome_major.to_string(), 1);
-        
-        let referer = if rng.gen_bool(0.6) {
-            SEARCH_ENGINES[rng.gen_range(0..SEARCH_ENGINES.len())]
-        } else {
-            INTERNAL_PAGES[rng.gen_range(0..INTERNAL_PAGES.len())]
-        };
-        
-        let accept_lang = ACCEPT_LANGUAGES[rng.gen_range(0..ACCEPT_LANGUAGES.len())];
-        
-        // Build headers with Client Hints
+        // Build Chrome-accurate headers
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert("User-Agent", ua.parse().unwrap());
+        headers.insert("User-Agent", profile.ua_template.replacen("{}", &chrome_major.to_string(), 1).parse().unwrap());
         headers.insert("Referer", referer.parse().unwrap());
-        headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8".parse().unwrap());
-        headers.insert("Accept-Encoding", "gzip, deflate, br".parse().unwrap());
-        headers.insert("Accept-Language", accept_lang.parse().unwrap());
-        headers.insert("Cache-Control", "no-cache".parse().unwrap());
-        headers.insert("Pragma", "no-cache".parse().unwrap());
         
-        // Client Hints (modern browsers)
+        // Add random Sec-Fetch headers
+        let is_iframe = rng.gen_bool(0.2); // 20% chance to simulate iframe load
+        let sec_headers = get_sec_fetch_headers_str(is_iframe);
+        for (k, v) in sec_headers {
+            if !v.is_empty() {
+                headers.insert(k, v.parse().unwrap());
+            }
+        }
+        
+        // Add Client Hints
+        let brands = profile.brands.replace("{}", &chrome_major.to_string());
         if profile.platform != "iOS" {
             headers.insert("Sec-CH-UA", brands.parse().unwrap());
             headers.insert("Sec-CH-UA-Mobile", if profile.mobile { "?1" } else { "?0" }.parse().unwrap());
             headers.insert("Sec-CH-UA-Platform", format!("\"{}\"", profile.platform).parse().unwrap());
-            headers.insert("Sec-Fetch-Dest", "document".parse().unwrap());
-            headers.insert("Sec-Fetch-Mode", "navigate".parse().unwrap());
-            headers.insert("Sec-Fetch-Site", "cross-site".parse().unwrap());
-            headers.insert("Sec-Fetch-User", "?1".parse().unwrap());
         }
+
+        // Add standard headers
+        headers.insert("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8".parse().unwrap());
+        headers.insert("Accept-Language", ACCEPT_LANGUAGES[rng.gen_range(0..ACCEPT_LANGUAGES.len())].parse().unwrap());
+        headers.insert("Upgrade-Insecure-Requests", "1".parse().unwrap());
         
         match request_with_retry(&client, &state.target_url, headers.clone(), &state.stats).await {
             Ok(resp) => {
@@ -1392,41 +1442,50 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                 if (200..400).contains(&status) {
                     state.stats.impressions.fetch_add(1, Ordering::Relaxed);
                     
-                    // Track ad network type
-                    let target_lower = state.target_url.to_lowercase();
-                    if target_lower.contains("a-ads") || target_lower.contains("aads") {
-                        state.stats.aads_hits.fetch_add(1, Ordering::Relaxed);
-                    } else if target_lower.contains("monetag") || target_lower.contains("surfrfrr") 
-                           || target_lower.contains("alwingulla") || target_lower.contains("niphaumeenses") {
-                        state.stats.monetag_hits.fetch_add(1, Ordering::Relaxed);
+                    // Enhanced Ad Network Detection
+                    if let Some(network) = detect_ad_network(&state.target_url, &body_str) {
+                        match network {
+                            "aads" => state.stats.aads_hits.fetch_add(1, Ordering::Relaxed),
+                            "monetag" => state.stats.monetag_hits.fetch_add(1, Ordering::Relaxed),
+                            _ => {} // Track others in generic stats if needed
+                        };
+                        
+                        if !state.config.quiet && id == 0 {
+                            println!("{} {} [{}]", "[AD]".green(), network.cyan(), status);
+                        }
                     }
                     
-                    // Check for popunder triggers in response
+                    // Check for popunder triggers
                     if body_str.contains("onclick") || body_str.contains("popunder") 
-                       || body_str.contains("window.open") {
+                       || body_str.contains("window.open") || body_str.contains("popads") {
                         state.stats.popunder_triggers.fetch_add(1, Ordering::Relaxed);
                     }
                     
-                    // Log only from worker 0 to reduce spam
+                    // Log success
                     if id == 0 && !state.config.quiet {
                         println!("{} {} via {}", "[HIT]".green(), status, proxy_addr.dimmed());
                     }
                     
-                    // Simulate human reading time (log-normal distribution)
-                    let read_time = (rng.gen::<f32>().ln().abs() * 2500.0).min(5000.0) as u64;
-                    sleep(Duration::from_millis(read_time)).await;
+                    // Human behavior: Dwell time
+                    sleep(simulate_dwell_time()).await;
                     
-                    // Click with configured rate (higher for Monetag popunders)
-                    let effective_click_rate = if target_lower.contains("monetag") {
-                        (state.config.click_rate * 1.5).min(0.15) // Boost for Monetag
-                    } else {
-                        state.config.click_rate
-                    };
+                    // Human behavior: Click simulation
+                    let base_rate = state.config.click_rate;
+                    let target_lower = state.target_url.to_lowercase();
                     
-                    if rng.gen_bool(effective_click_rate as f64) {
-                        sleep(Duration::from_millis(rng.gen_range(200..800))).await;
+                    let network = detect_ad_network(&state.target_url, &body_str);
+                    let effective_click_rate = get_network_click_rate(network, base_rate);
+                    
+                    if rng.gen::<f32>() < effective_click_rate {
+                        // Organic click delay (human reaction time)
+                        sleep(organic_click_delay()).await;
+                        
                         let _ = request_with_retry(&client, &state.target_url, headers, &state.stats).await;
                         state.stats.clicks.fetch_add(1, Ordering::Relaxed);
+
+                        if id == 0 && !state.config.quiet {
+                             println!("{} via {}", "[CLICK]".yellow(), proxy_addr.dimmed());
+                        }
                     }
                 } else {
                     state.stats.errors.fetch_add(1, Ordering::Relaxed);
