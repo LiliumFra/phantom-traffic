@@ -1295,7 +1295,7 @@ async fn request_with_retry(
     url: &str,
     headers: reqwest::header::HeaderMap,
     stats: &Arc<Stats>,
-) -> Result<reqwest::Response, reqwest::Error> {
+) -> anyhow::Result<reqwest::Response> {
     let mut last_error = None;
     
     for attempt in 0..MAX_RETRIES {
@@ -1471,7 +1471,6 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                     
                     // Human behavior: Click simulation
                     let base_rate = state.config.click_rate;
-                    let target_lower = state.target_url.to_lowercase();
                     
                     let network = detect_ad_network(&state.target_url, &body_str);
                     let effective_click_rate = get_network_click_rate(network, base_rate);
@@ -1766,7 +1765,6 @@ async fn main() -> Result<()> {
     let workers = if args.workers == 50 && config.workers.is_none() {
         // Default value, ask user
         println!("{}", "\n¿Cuántos workers/hilos quieres usar? [default: 50]:".cyan());
-        let mut input = String::new();
         let stdin = tokio::io::stdin();
         let reader = BufReader::new(stdin);
         let mut lines = reader.lines();
@@ -1784,7 +1782,6 @@ async fn main() -> Result<()> {
     // Interactive: Ask for validation threads
     println!("{}", "\n¿Cuántos hilos para validar proxies? [default: 50]:".cyan());
     let validation_threads = {
-        let mut input = String::new();
         let stdin = tokio::io::stdin();
         let reader = BufReader::new(stdin);
         let mut lines = reader.lines();

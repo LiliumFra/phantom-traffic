@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# PHANTOM TRAFFIC v36 - AUTO INSTALLER FOR TERMUX
+# PHANTOM TRAFFIC v37 - AUTO INSTALLER FOR TERMUX
 # One-command installation script
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -16,7 +16,7 @@ NC='\033[0m' # No Color
 
 echo -e "${MAGENTA}"
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║       PHANTOM TRAFFIC v36 - RUST TURBO INSTALLER          ║"
+echo "║       PHANTOM TRAFFIC v37 - RUST TURBO INSTALLER          ║"
 echo "║              Optimized for Termux/Android                 ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
@@ -122,20 +122,17 @@ cd "$PROJECT_DIR"
 echo -e "${YELLOW}[*] Building ICE COLD (this may take 5-20 minutes on Termux)...${NC}"
 echo -e "${CYAN}    (Go grab a coffee ☕)${NC}"
 
+# Build with error checking
+set -o pipefail
 if [ "$IS_TERMUX" = true ]; then
     # Termux-specific optimizations
-    export CARGO_BUILD_JOBS=2  # Limit jobs to prevent OOM on low-end devices
-    cargo build --release 2>&1 | tail -20
+    export CARGO_BUILD_JOBS=2
+    cargo build --release 2>&1 | tail -50 || (echo -e "\n\e[31m[!] Build failed! Check errors above.\e[0m" && exit 1)
 else
-    cargo build --release 2>&1 | tail -20
+    cargo build --release 2>&1 | tail -50 || (echo -e "\n\e[31m[!] Build failed! Check errors above.\e[0m" && exit 1)
 fi
 
-if [ $? -eq 0 ]; then
-    echo -e "${GREEN}[✓] Build successful!${NC}"
-else
-    echo -e "${RED}[✗] Build failed. Check errors above.${NC}"
-    exit 1
-fi
+echo -e "\e[32m[✓] Build successful!\e[0m"
 
 # Create symlink
 echo -e "${YELLOW}[*] Creating command symlink...${NC}"
