@@ -1313,7 +1313,7 @@ async fn request_with_retry(
         }
     }
     
-    Err(last_error.unwrap())
+    Err(last_error.unwrap().into())
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -1436,8 +1436,27 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
         match request_with_retry(&client, &state.target_url, headers.clone(), &state.stats).await {
             Ok(resp) => {
                 let status = resp.status().as_u16();
-                let body = resp.bytes().await.unwrap_or_default();
-                let body_str = String::from_utf8_lossy(&body);
+                
+                // Phase 5: Stream response instead of buffering (Memory Optimization)
+                let mut body_str = String::new();
+                let mut stream = resp.bytes_stream();
+                use futures::StreamExt;
+                
+                // Limit body read to 128KB to prevent OOM on Termux
+                let max_body_size = 128 * 1024;
+                let mut bytes_read = 0;
+                
+                while let Some(chunk_result) = stream.next().await {
+                    if let Ok(chunk) = chunk_result {
+                        bytes_read += chunk.len();
+                        body_str.push_str(&String::from_utf8_lossy(&chunk));
+                        if bytes_read >= max_body_size {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 
                 if (200..400).contains(&status) {
                     state.stats.impressions.fetch_add(1, Ordering::Relaxed);
@@ -1445,8 +1464,8 @@ async fn worker(id: usize, state: Arc<AppState>, semaphore: Arc<Semaphore>) {
                     // Enhanced Ad Network Detection
                     if let Some(network) = detect_ad_network(&state.target_url, &body_str) {
                         match network {
-                            "aads" => state.stats.aads_hits.fetch_add(1, Ordering::Relaxed),
-                            "monetag" => state.stats.monetag_hits.fetch_add(1, Ordering::Relaxed),
+                            "aads" => { state.stats.aads_hits.fetch_add(1, Ordering::Relaxed); },
+                            "monetag" => { state.stats.monetag_hits.fetch_add(1, Ordering::Relaxed); },
                             _ => {} // Track others in generic stats if needed
                         };
                         
@@ -1761,8 +1780,31 @@ async fn main() -> Result<()> {
     let target_url = get_target_url(&args, &config).await?;
     println!("{}", format!("[✓] Target: {}", target_url).green());
     
-    // Interactive: Ask for workers count if not specified via CLI
-    let workers = if args.workers == 50 && config.workers.is_none() {
+    // Phase 5: Config Presets for Termux
+    println!("{}", "\nSelecciona un perfil de rendimiento:".cyan());
+    println!("1. Tablet/Celu GAMA BAJA (20 workers, 1 Tor)");
+    println!("2. Tablet/Celu GAMA ALTA (75 workers, 4 Tor)");
+    println!("3. Personalizado [default]");
+    
+    let preset_choice = {
+        let stdin = tokio::io::stdin();
+        let reader = BufReader::new(stdin);
+        let mut lines = reader.lines();
+        if let Ok(Some(line)) = lines.next_line().await {
+            line.trim().to_string()
+        } else {
+            "3".to_string()
+        }
+    };
+
+    let (preset_workers, preset_tor) = match preset_choice.as_str() {
+        "1" => (Some(20), Some(1)),
+        "2" => (Some(75), Some(4)),
+        _ => (None, None),
+    };
+
+    // Interactive: Ask for workers count if not specified via CLI/Preset
+    let workers = if args.workers == 50 && config.workers.is_none() && preset_workers.is_none() {
         // Default value, ask user
         println!("{}", "\n¿Cuántos workers/hilos quieres usar? [default: 50]:".cyan());
         let stdin = tokio::io::stdin();
@@ -1775,7 +1817,7 @@ async fn main() -> Result<()> {
             50
         }
     } else {
-        config.workers.unwrap_or(args.workers)
+        preset_workers.or(config.workers).unwrap_or(args.workers)
     };
     println!("{}", format!("[✓] Workers: {}", workers).green());
     
@@ -1796,7 +1838,7 @@ async fn main() -> Result<()> {
     println!("{}", format!("[✓] Validation threads: {}", validation_threads).green());
     
     // Start Tor if enabled
-    let tor_instances = config.tor_instances.unwrap_or(args.tor_instances);
+    let tor_instances = preset_tor.or(config.tor_instances).unwrap_or(args.tor_instances);
     let tor_ports = if args.no_tor || config.no_tor.unwrap_or(false) {
         println!("{}", "[*] Tor disabled by config".yellow());
         vec![]
