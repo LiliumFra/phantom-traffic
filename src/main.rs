@@ -295,6 +295,43 @@ const PROXY_SOURCES: &[&str] = &[
     // MuRongPIG
     "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt",
     "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/socks5.txt",
+    
+    // === NEW SOURCES (15+ more) ===
+    
+    // im-razvan
+    "https://raw.githubusercontent.com/im-razvan/proxy_list/main/http.txt",
+    "https://raw.githubusercontent.com/im-razvan/proxy_list/main/socks5.txt",
+    
+    // Zaeem20
+    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt",
+    "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/socks5.txt",
+    
+    // zevtyardt
+    "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt",
+    "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/socks5.txt",
+    
+    // officialputuid
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/http/http.txt",
+    "https://raw.githubusercontent.com/officialputuid/KangProxy/KangProxy/socks5/socks5.txt",
+    
+    // yemixzy
+    "https://raw.githubusercontent.com/yemixzy/proxy-list/main/proxies/http.txt",
+    "https://raw.githubusercontent.com/yemixzy/proxy-list/main/proxies/socks5.txt",
+    
+    // rx443
+    "https://raw.githubusercontent.com/rx443/proxy-list/main/online/http.txt",
+    "https://raw.githubusercontent.com/rx443/proxy-list/main/online/socks5.txt",
+    
+    // Anonym0usWork1221
+    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt",
+    "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/socks5_proxies.txt",
+    
+    // proxy4parsing
+    "https://raw.githubusercontent.com/proxy4parsing/proxy-list/main/http.txt",
+    
+    // berkay-digital
+    "https://raw.githubusercontent.com/berkay-digital/Proxy-Starter/main/http.txt",
+    "https://raw.githubusercontent.com/berkay-digital/Proxy-Starter/main/socks5.txt",
 ];
 
 const SEARCH_ENGINES: &[&str] = &[
@@ -517,6 +554,9 @@ struct Stats {
     aads_hits: AtomicU64,
     monetag_hits: AtomicU64,
     popunder_triggers: AtomicU64,
+    // Progress tracking
+    validation_total: AtomicU64,
+    validation_progress: AtomicU64,
 }
 
 impl Stats {
@@ -532,7 +572,54 @@ impl Stats {
             aads_hits: AtomicU64::new(0),
             monetag_hits: AtomicU64::new(0),
             popunder_triggers: AtomicU64::new(0),
+            validation_total: AtomicU64::new(0),
+            validation_progress: AtomicU64::new(0),
         }
+    }
+}
+
+/// Proxy blacklist with TTL to avoid retrying dead proxies
+struct ProxyBlacklist {
+    entries: RwLock<HashMap<String, u64>>, // proxy addr -> expiry timestamp
+    ttl_seconds: u64,
+}
+
+impl ProxyBlacklist {
+    fn new(ttl_seconds: u64) -> Self {
+        Self {
+            entries: RwLock::new(HashMap::new()),
+            ttl_seconds,
+        }
+    }
+    
+    /// Add a proxy to the blacklist
+    async fn add(&self, addr: &str) {
+        let expiry = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + self.ttl_seconds;
+        self.entries.write().await.insert(addr.to_string(), expiry);
+    }
+    
+    /// Check if a proxy is blacklisted (and clean expired entries)
+    async fn is_blacklisted(&self, addr: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        
+        let mut entries = self.entries.write().await;
+        
+        // Remove expired entries
+        entries.retain(|_, expiry| *expiry > now);
+        
+        // Check if this proxy is blacklisted
+        entries.contains_key(addr)
+    }
+    
+    /// Get blacklist size
+    async fn len(&self) -> usize {
+        self.entries.read().await.len()
     }
 }
 
@@ -540,6 +627,7 @@ struct AppState {
     proxies: RwLock<BinaryHeap<RatedProxy>>,
     burned_ips: RwLock<HashSet<String>>,
     daily_ips: RwLock<HashSet<String>>,
+    blacklist: Arc<ProxyBlacklist>,
     stats: Arc<Stats>,
     target_url: String,
     tor_ports: Vec<u16>,
@@ -1541,11 +1629,15 @@ async fn main() -> Result<()> {
         quiet: args.quiet,
     };
     
+    // Create proxy blacklist (5 min TTL)
+    let blacklist = Arc::new(ProxyBlacklist::new(300));
+    
     // Create app state
     let state = Arc::new(AppState {
         proxies: RwLock::new(gold_proxies),
         burned_ips: RwLock::new(HashSet::new()),
         daily_ips: RwLock::new(HashSet::new()),
+        blacklist: blacklist.clone(),
         stats: stats.clone(),
         target_url,
         tor_ports,
