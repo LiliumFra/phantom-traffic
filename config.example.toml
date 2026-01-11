@@ -1,0 +1,34 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# ICE COLD v35 - Configuration File
+# Copy to ~/.config/icecold/config.toml or ./icecold.toml
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Target URL (optional - can also be set via CLI or interactive mode)
+# target_url = "https://example.com/your-target"
+
+# Number of concurrent workers
+# Lower values (20-30) recommended for low-end Android devices
+# Higher values (50-100) for desktop/server
+workers = 50
+
+# Click rate (0.0 to 1.0)
+# 0.055 = 5.5% of impressions will generate a click
+click_rate = 0.055
+
+# Disable Tor (set to true if Tor is not installed or causes issues)
+no_tor = false
+
+# Number of Tor instances to run (each uses ~30MB RAM)
+# Reduce to 2-3 on low-memory devices
+tor_instances = 4
+
+# Base delay between requests in milliseconds
+# Higher values = slower but more realistic traffic
+delay_ms = 3500
+
+# Request timeout in seconds
+timeout_sec = 35
+
+# Proxy refresh interval in minutes
+# How often to fetch and validate new proxies
+refresh_mins = 12

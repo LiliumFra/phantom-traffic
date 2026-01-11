@@ -1,0 +1,30 @@
+# Logs
+*.log
+
+# Build artifacts
+target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp files
+*.tmp
+*.bak
+
+# Rust installer
+rustup-init.exe
+
+# Data files (local)
+*.json
+!package.json
+
+# Tor data
+tor_pool/
