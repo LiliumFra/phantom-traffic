@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════════
-# ICE COLD v35 - AUTO INSTALLER FOR TERMUX
+# PHANTOM TRAFFIC v36 - AUTO INSTALLER FOR TERMUX
 # One-command installation script
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -16,7 +16,7 @@ NC='\033[0m' # No Color
 
 echo -e "${MAGENTA}"
 echo "╔═══════════════════════════════════════════════════════════╗"
-echo "║         ICE COLD v35 - RUST TURBO INSTALLER               ║"
+echo "║       PHANTOM TRAFFIC v36 - RUST TURBO INSTALLER          ║"
 echo "║              Optimized for Termux/Android                 ║"
 echo "╚═══════════════════════════════════════════════════════════╝"
 echo -e "${NC}"
