@@ -1,6 +1,6 @@
 [package]
 name = "icecold"
-version = "37.0.0"
+version = "39.0.0"
 edition = "2021"
 authors = ["Phantom Traffic Team"]
 description = "Ultra-optimized traffic bot with human behavior simulation and anti-detection"
@@ -18,7 +18,7 @@ strip = true
 tokio = { version = "1.35", features = ["rt", "rt-multi-thread", "net", "time", "macros", "signal", "fs", "process", "io-util", "sync", "io-std"] }
 
 # HTTP client with proxy support and cookies
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "socks", "gzip", "brotli", "stream", "cookies"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "socks", "gzip", "brotli", "stream", "cookies", "json"] }
 
 # Async utilities
 futures = "0.3"
@@ -55,6 +55,12 @@ once_cell = "1.19"
 
 # System info (for detecting Termux)
 whoami = "1.4"
+
+# DateTime handling for A-Ads IP tracking
+chrono = { version = "0.4", features = ["serde"] }
+
+# SQLite for IP tracking persistence (bundled for Termux compatibility)
+rusqlite = { version = "0.31", features = ["bundled"] }
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.27", features = ["signal", "process"] }
