@@ -7,7 +7,7 @@
 use std::sync::atomic::{AtomicU64, AtomicI64, AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use std::collections::{HashSet, BinaryHeap, HashMap};
+use std::collections::{HashSet, HashMap};
 use std::cmp::Ordering as CmpOrdering;
 use std::path::PathBuf;
 
@@ -142,8 +142,13 @@ async fn load_config(path: Option<PathBuf>) -> Config {
 // ═══════════════════════════════════════════════════════════════════════════════
 const BASE_SOCKS_PORT: u16 = 9050;
 const MAX_PROXIES_CACHE: usize = 40000;
-const VALIDATION_TIMEOUT_MS: u64 = 5000;
-const VALIDATION_BATCH_SIZE: usize = 100;
+#[allow(dead_code)]
+const VALIDATION_TIMEOUT_MS: u64 = 2000;  // For future use with slower validation
+#[allow(dead_code)]
+const QUICK_VALIDATION_TIMEOUT_MS: u64 = 1500;  // Ultra-fast validation for background
+#[allow(dead_code)]
+const VALIDATION_BATCH_SIZE: usize = 200;  // For batch processing if needed
+const BACKGROUND_REFRESH_SECS: u64 = 120;  // Refresh proxies every 2 minutes in background
 const GOLD_PROXIES_FILE: &str = "gold_proxies.json";
 const MIN_GOLD_SPEED_MS: u64 = 3000;
 const MAX_RETRIES: u32 = 3;
@@ -314,25 +319,7 @@ const PROXY_SOURCES: &[&str] = &[
     "https://raw.githubusercontent.com/berkay-digital/Proxy-Starter/main/socks5.txt",
 ];
 
-const SEARCH_ENGINES: &[&str] = &[
-    "https://www.google.com/search?q=crypto+exchange",
-    "https://www.google.com/search?q=dolar+blue+argentina",
-    "https://www.google.com/search?q=usdt+p2p+argentina",
-    "https://www.bing.com/search?q=dolar+blue+hoy",
-    "https://www.bing.com/search?q=cotizacion+dolar",
-    "https://duckduckgo.com/?q=usdt+p2p",
-    "https://duckduckgo.com/?q=cripto+argentina",
-    "https://search.yahoo.com/search?p=dolar+mep",
-    "https://www.ecosia.org/search?q=dolar+ccl",
-];
-
-const INTERNAL_PAGES: &[&str] = &[
-    "https://www.dolarix.xyz/?ref=rust_opt",
-    "https://www.dolarix.xyz/dolar-crypto",
-    "https://www.dolarix.xyz/noticias",
-    "https://www.dolarix.xyz/calculadora",
-    "https://www.dolarix.xyz/historico",
-];
+// Note: SEARCH_ENGINES and INTERNAL_PAGES removed - unused legacy constants
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DEVICE PROFILES WITH CLIENT HINTS
@@ -1107,10 +1094,7 @@ impl TorCircuitManager {
 // GEOLOCATION FOR HIGH-CPM COUNTRIES
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// Check if country has high CPM (tier 1)
-fn is_high_cpm_country(country: &str) -> bool {
-    matches!(country, "US" | "GB" | "CA" | "AU" | "DE" | "FR" | "NL" | "CH" | "NO" | "SE" | "DK")
-}
+// Note: is_high_cpm_country removed - unused legacy function
 
 /// Country CPM multiplier for scoring
 fn country_cpm_score(country: &str) -> u64 {
@@ -1124,44 +1108,7 @@ fn country_cpm_score(country: &str) -> u64 {
     }
 }
 
-/// Geolocate a proxy IP using ip-api.com (cached)
-async fn geolocate_proxy(
-    ip: &str, 
-    cache: &RwLock<HashMap<String, (String, i64)>>,
-) -> Option<String> {
-    const CACHE_TTL: i64 = 7 * 24 * 3600; // 7 days
-    
-    // Check cache first
-    {
-        let cache_read = cache.read().await;
-        if let Some((country, ts)) = cache_read.get(ip) {
-            let now = Utc::now().timestamp();
-            if now - ts < CACHE_TTL {
-                return Some(country.clone());
-            }
-        }
-    }
-    
-    // Query ip-api.com (free, no key required, 45 req/min limit)
-    let url = format!("http://ip-api.com/json/{}?fields=countryCode", ip);
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .ok()?;
-    
-    let resp = client.get(&url).send().await.ok()?;
-    let json: serde_json::Value = resp.json().await.ok()?;
-    let country = json.get("countryCode")?.as_str()?.to_string();
-    
-    // Cache result
-    {
-        let mut cache_write = cache.write().await;
-        let now = Utc::now().timestamp();
-        cache_write.insert(ip.to_string(), (country.clone(), now));
-    }
-    
-    Some(country)
-}
+// Note: geolocate_proxy removed - unused legacy function
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // SMART PROXY POOL (Phase 3)
@@ -1348,16 +1295,7 @@ fn simulate_dwell_time() -> Duration {
     Duration::from_secs_f64(base_seconds as f64 * variance)
 }
 
-/// Simulate realistic scroll position for ad viewability
-fn simulate_scroll_position(page_height: u32) -> u32 {
-    let mut rng = rand::thread_rng();
-    // 70% of time scroll to middle, 30% deeper
-    if rng.gen_bool(0.7) {
-        rng.gen_range(100..page_height / 2)
-    } else {
-        rng.gen_range(page_height / 2..page_height.saturating_sub(100))
-    }
-}
+// Note: simulate_scroll_position removed - unused
 
 /// Generate organic click timing with human patterns
 fn organic_click_delay() -> Duration {
@@ -1528,15 +1466,12 @@ async fn save_stats(stats: &Stats) -> std::io::Result<()> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// PROXY VALIDATION
+// PROXY VALIDATION (OPTIMIZED)
 // ═══════════════════════════════════════════════════════════════════════════════
-async fn validate_proxy(addr: &str, proxy_type: ProxyType) -> Option<RatedProxy> {
-    let test_urls = [
-        "https://httpbin.org/ip",
-        "https://api.ipify.org?format=json",
-        "https://ifconfig.me/ip",
-    ];
-    
+
+/// Quick validation - ultra-fast for background proxy discovery
+/// Uses single fast endpoint with aggressive timeout
+async fn quick_validate_proxy(addr: &str, proxy_type: ProxyType) -> Option<RatedProxy> {
     let proxy_url = match proxy_type {
         ProxyType::Http => format!("http://{}", addr),
         ProxyType::Socks5 => format!("socks5://{}", addr),
@@ -1546,51 +1481,28 @@ async fn validate_proxy(addr: &str, proxy_type: ProxyType) -> Option<RatedProxy>
     let proxy = reqwest::Proxy::all(&proxy_url).ok()?;
     let client = reqwest::Client::builder()
         .proxy(proxy)
-        .timeout(Duration::from_millis(VALIDATION_TIMEOUT_MS))
+        .timeout(Duration::from_millis(QUICK_VALIDATION_TIMEOUT_MS))
         .build()
         .ok()?;
     
     let start = Instant::now();
     
-    for test_url in test_urls {
-        match client.get(test_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                let speed_ms = start.elapsed().as_millis() as u64;
-                
-                if speed_ms < MIN_GOLD_SPEED_MS {
-                    return Some(RatedProxy::new(addr.to_string(), speed_ms, proxy_type));
-                }
-                return None;
+    // Single fast endpoint for quick validation
+    match client.get("http://ip-api.com/json/?fields=query").send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let speed_ms = start.elapsed().as_millis() as u64;
+            if speed_ms < MIN_GOLD_SPEED_MS {
+                return Some(RatedProxy::new(addr.to_string(), speed_ms, proxy_type));
             }
-            _ => continue,
         }
+        _ => {}
     }
     
     None
 }
 
-async fn validate_proxies_batch(proxies: Vec<(String, ProxyType)>) -> Vec<RatedProxy> {
-    let semaphore = Arc::new(Semaphore::new(50)); // Limit concurrent validations
-    let mut handles = Vec::new();
-    
-    for (proxy, ptype) in proxies {
-        let permit = semaphore.clone().acquire_owned().await.unwrap();
-        handles.push(tokio::spawn(async move {
-            let result = validate_proxy(&proxy, ptype).await;
-            drop(permit);
-            result
-        }));
-    }
-    
-    let mut validated = Vec::new();
-    for handle in handles {
-        if let Ok(Some(proxy)) = handle.await {
-            validated.push(proxy);
-        }
-    }
-    
-    validated
-}
+
+// Note: validate_proxy and validate_proxies_batch removed - replaced by quick_validate_proxy
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // TOR MANAGEMENT (Termux Compatible)
@@ -1698,100 +1610,67 @@ async fn start_tor_pool(instances: usize) -> Result<Vec<u16>> {
     Ok(ports)
 }
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// FETCH PROXIES
-// ═══════════════════════════════════════════════════════════════════════════════
-async fn fetch_and_validate_proxies(
-    stats: Arc<Stats>,
-    quiet: bool,
-) -> Vec<RatedProxy> {
-    let urls = vec![
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
-        "https://www.proxy-list.download/api/v1/get?type=http",
-        "https://www.proxyscan.io/download?type=http",
-    ];
-    
-    let mut all_proxies = Vec::new();
-    for url in urls {
-        match reqwest::get(url).await {
-            Ok(resp) => {
-                if let Ok(text) = resp.text().await {
-                    for line in text.lines() {
-                        if !line.trim().is_empty() {
-                            all_proxies.push((line.trim().to_string(), ProxyType::Http));
-                        }
-                    }
-                }
-            }
-            Err(_) => {}
-        }
-    }
-    
-    // Deduplicate
-    let mut seen = HashSet::new();
-    let unique: Vec<(String, ProxyType)> = all_proxies
-        .into_iter()
-        .filter(|(addr, _)| seen.insert(addr.clone()))
-        .collect();
-        
-    let mut validated = Vec::new();
-    for (addr, ptype) in unique {
-        if let Some(proxy) = validate_proxy(&addr, ptype).await {
-            stats.validated.fetch_add(1, Ordering::Relaxed);
-            validated.push(proxy);
-        }
-    }
-    validated
-}
+// Note: fetch_and_validate_proxies removed - replaced by fetch_and_validate_proxies_threaded
 
-/// Fetch and validate proxies with configurable thread count
+/// Fetch and validate proxies with configurable thread count - USES ALL 60+ SOURCES
 async fn fetch_and_validate_proxies_threaded(
     threads: usize,
     stats: Arc<Stats>,
     quiet: bool,
 ) -> Vec<RatedProxy> {
-    // Phase 4: Use specialized sources if detected (Placeholder for future)
+    if !quiet {
+        println!("{}", format!("[*] Fetching from {} proxy sources...", PROXY_SOURCES.len()).cyan());
+    }
     
-    let sources = vec![
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all",
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks4&timeout=10000&country=all",
-        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=10000&country=all",
-        "https://www.proxy-list.download/api/v1/get?type=http",
-        "https://www.proxy-list.download/api/v1/get?type=socks4",
-        "https://www.proxy-list.download/api/v1/get?type=socks5",
-        "https://spys.me/proxy.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks4.txt",
-        "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt",
-    ];
-    
+    // Fetch from ALL 60+ sources in parallel
     let mut handles = Vec::new();
-    for url in sources {
+    for url in PROXY_SOURCES {
+        let url = url.to_string();
         handles.push(tokio::spawn(async move {
-            match reqwest::get(url).await {
-                Ok(resp) => {
-                    if let Ok(text) = resp.text().await {
-                        let ptype = if url.contains("socks5") {
-                            ProxyType::Socks5
-                        } else if url.contains("socks4") {
-                            ProxyType::Socks4
-                        } else {
-                            ProxyType::Http
-                        };
-                        
-                        text.lines()
-                            .filter(|l| !l.trim().is_empty())
-                            .map(|l| (l.trim().to_string(), ptype))
-                            .collect::<Vec<(String, ProxyType)>>()
-                    } else {
-                        Vec::new()
+            let client = reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .ok();
+            
+            if let Some(client) = client {
+                match client.get(&url).send().await {
+                    Ok(resp) => {
+                        if let Ok(text) = resp.text().await {
+                            let ptype = if url.contains("socks5") {
+                                ProxyType::Socks5
+                            } else if url.contains("socks4") {
+                                ProxyType::Socks4
+                            } else {
+                                ProxyType::Http
+                            };
+                            
+                            // Parse proxy list - handle different formats
+                            let proxies: Vec<(String, ProxyType)> = text.lines()
+                                .filter(|l| {
+                                    let l = l.trim();
+                                    !l.is_empty() && !l.starts_with('#') && !l.starts_with("//")
+                                })
+                                .filter_map(|l| {
+                                    // Extract IP:PORT from various formats
+                                    let l = l.trim();
+                                    // Check if it looks like IP:PORT
+                                    if l.contains(':') && l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                                        let parts: Vec<&str> = l.split_whitespace().next()?.split(':').collect();
+                                        if parts.len() >= 2 {
+                                            return Some((format!("{}:{}", parts[0], parts[1]), ptype));
+                                        }
+                                    }
+                                    None
+                                })
+                                .collect();
+                            
+                            return proxies;
+                        }
                     }
+                    Err(_) => {}
                 }
-                Err(_) => Vec::new(),
             }
+            Vec::new()
         }));
     }
     
@@ -1810,14 +1689,14 @@ async fn fetch_and_validate_proxies_threaded(
         .collect();
     
     if !quiet {
-        println!("{}", format!("[*] {} unique. Validating with {} threads...", unique.len(), threads).yellow());
+        println!("{}", format!("[*] {} unique proxies found. Validating with {} threads...", unique.len(), threads).yellow());
     }
     
-    // Create progress bar
+    // Create progress bar with better style
     let pb = if !quiet {
         let bar = ProgressBar::new(unique.len() as u64);
         bar.set_style(ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ({eta})")
+            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} ✓{msg}")
             .unwrap()
             .progress_chars("█▓░"));
         Some(bar)
@@ -1825,51 +1704,66 @@ async fn fetch_and_validate_proxies_threaded(
         None
     };
     
-    let mut validated_list = Vec::new();
-    let semaphore = Arc::new(Semaphore::new(threads));
-    let validated_count = Arc::new(AtomicU64::new(0));
+    let validated_list = Arc::new(RwLock::new(Vec::new()));
+    let semaphore = Arc::new(Semaphore::new(threads.max(50).min(150))); // Min 50, Max 150 threads
+    let good_count = Arc::new(AtomicU64::new(0));
     
-    for chunk in unique.chunks(VALIDATION_BATCH_SIZE) {
-        let mut chunk_handles = Vec::new();
+    // Process ALL proxies in parallel with batching
+    let mut all_handles = Vec::new();
+    
+    for (proxy, ptype) in unique {
+        let sem = semaphore.clone();
+        let pb_clone = pb.clone();
+        let validated_list_clone = validated_list.clone();
+        let stats_clone = stats.clone();
+        let good_count_clone = good_count.clone();
         
-        for (proxy, ptype) in chunk.to_vec() {
-            let sem = semaphore.clone();
-            let pb_clone = pb.clone();
-            let count = validated_count.clone();
-            chunk_handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                let result = validate_proxy(&proxy, ptype).await;
-                count.fetch_add(1, Ordering::Relaxed);
-                if let Some(ref bar) = pb_clone {
-                    bar.inc(1);
-                }
-                result
-            }));
-        }
-        
-        for handle in chunk_handles {
-            if let Ok(Some(proxy)) = handle.await {
-                stats.validated.fetch_add(1, Ordering::Relaxed);
+        all_handles.push(tokio::spawn(async move {
+            let _permit = sem.acquire().await.unwrap();
+            
+            // Use quick validation for speed
+            if let Some(validated_proxy) = quick_validate_proxy(&proxy, ptype).await {
+                stats_clone.validated.fetch_add(1, Ordering::Relaxed);
+                good_count_clone.fetch_add(1, Ordering::Relaxed);
                 
-                if proxy.speed_ms < MIN_GOLD_SPEED_MS {
-                    let _ = save_gold_proxy(&proxy).await;
-                    stats.gold_saved.fetch_add(1, Ordering::Relaxed);
+                if validated_proxy.speed_ms < MIN_GOLD_SPEED_MS {
+                    let _ = save_gold_proxy(&validated_proxy).await;
+                    stats_clone.gold_saved.fetch_add(1, Ordering::Relaxed);
                 }
                 
-                validated_list.push(proxy);
-                
-                if validated_list.len() >= MAX_PROXIES_CACHE {
-                    break;
+                let mut list = validated_list_clone.write().await;
+                if list.len() < MAX_PROXIES_CACHE {
+                    list.push(validated_proxy);
                 }
             }
-        }
+            
+            if let Some(ref bar) = pb_clone {
+                bar.inc(1);
+                let good = good_count_clone.load(Ordering::Relaxed);
+                bar.set_message(format!(" {} valid", good));
+            }
+        }));
     }
     
-    if !quiet {
-        println!("{}", format!("[✓] {} validated", validated_list.len()).green());
+    // Wait for all validations
+    for handle in all_handles {
+        let _ = handle.await;
     }
-    validated_list
+    
+    if let Some(bar) = pb {
+        bar.finish_with_message(" Done!");
+    }
+    
+    let final_list = validated_list.read().await.clone();
+    
+    if !quiet {
+        println!("{}", format!("[✓] {} proxies validated and ready!", final_list.len()).green().bold());
+    }
+    
+    final_list
 }
+
+// Note: background_proxy_refresh function removed - logic inlined in main()
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // REQUEST WITH RETRY
@@ -2279,45 +2173,43 @@ async fn monitor(state: Arc<AppState>, start: Instant) {
             hrs, mins % 60, elapsed.as_secs() % 60).yellow());
         println!("{}", "╚═══════════════════════════════════════════════════╝".magenta());
         
-        // A-Ads ALERTS & AUTO-STOP (Phase 3)
+        // A-Ads ALERTS & AGGRESSIVE ROTATION (NO AUTO-STOP)
         if state.config.aads_mode && total_aads > 100 {
-            if unique_rate < 10.0 {
-                // Check if this is a sustained low rate
+            if unique_rate < state.config.auto_stop_threshold {
+                // Low unique rate detected - trigger aggressive Tor rotation instead of stopping
                 let now = Utc::now().timestamp();
                 let since = state.stats.low_unique_rate_since.load(Ordering::Relaxed);
                 
                 if since == 0 {
                     // First time detection
                     state.stats.low_unique_rate_since.store(now, Ordering::Relaxed);
-                } else if state.config.auto_stop_enabled && (now - since) > state.config.auto_stop_duration as i64 {
-                    // Auto-Stop triggered!
-                    println!();
-                    println!("{}", "╔═══════════════════════════════════════════════════╗".red().bold());
-                    println!("{}", "║  🛑 AUTO-STOP TRIGGERED: LOW UNIQUE RATE          ║".red().bold());
-                    println!("{}", "║  Unique rate <10% for >30 minutes.                ║".red());
-                    println!("{}", "║  Stopping to preserve IPs and avoid bans.         ║".red());
-                    println!("{}", "╚═══════════════════════════════════════════════════╝".red().bold());
-                    
-                    state.shutdown.store(true, Ordering::Relaxed);
-                    break;
+                }
+                
+                // Trigger emergency Tor rotation to get fresh IPs (every 30 seconds during affiliate mode)
+                if let Some(ref tor_mgr) = state.tor_manager {
+                    if (now - since) % 30 == 0 {
+                        tor_mgr.rotate_all_stale().await;
+                    }
                 }
                 
                 println!();
-                println!("{}", "╔═══════════════════════════════════════════════════╗".red().bold());
-                println!("{}", "║  ⚠️  ALERT: AFFILIATE MODE DETECTED!              ║".red().bold());
-                println!("{}", "║  Unique rate <10% - A-Ads showing affiliate ads   ║".red());
-                if state.config.auto_stop_enabled && since > 0 {
-                    let remaining = state.config.auto_stop_duration as i64 - (now - since);
-                    println!("║  Auto-stop in: {:>4}s                              ║", remaining.max(0).to_string().yellow());
+                println!("{}", "╔═══════════════════════════════════════════════════╗".yellow().bold());
+                println!("{}", "║  ⚡ AFFILIATE MODE - ROTATING IPS AGGRESSIVELY!   ║".yellow().bold());
+                println!("║  Unique rate: {:>5.1}% (threshold: {:>5.1}%)          ║", unique_rate, state.config.auto_stop_threshold);
+                println!("{}", "║  Bot continues running with aggressive rotation   ║".yellow());
+                if state.tor_manager.is_some() {
+                    println!("{}", "║  ✓ Tor circuits being rotated for fresh IPs      ║".green());
+                } else {
+                    println!("{}", "║  ⚠ Enable Tor for better IP rotation             ║".red());
                 }
-                println!("{}", "╚═══════════════════════════════════════════════════╝".red().bold());
+                println!("{}", "╚═══════════════════════════════════════════════════╝".yellow().bold());
             } else {
                 // Reset timer if rate recovers
                 state.stats.low_unique_rate_since.store(0, Ordering::Relaxed);
                 
                 if unique_rate < 30.0 {
                     println!();
-                    println!("{}", "⚠️  WARNING: Unique rate <30% - Increase IP rotation!".yellow().bold());
+                    println!("{}", "📊 Unique rate <30% - Consider adding more proxies!".cyan().bold());
                 }
             }
         }
@@ -2434,6 +2326,7 @@ fn extract_url_from_html(html: &str) -> Option<String> {
 }
 
 /// Extract ALL ad URLs from HTML (for multi-ad support)
+#[allow(dead_code)]
 fn extract_all_ad_urls(html: &str) -> Vec<String> {
     let mut urls = Vec::new();
     let mut seen = HashSet::new();
@@ -2661,9 +2554,9 @@ async fn main() -> Result<()> {
         quiet: args.quiet,
         aads_mode,
         cpm_estimate: 0.001, // $0.001 per unique impression (default)
-        auto_stop_enabled: aads_mode, // Only enable auto-stop in A-Ads mode
-        auto_stop_threshold: 10.0,    // Stop when unique rate < 10%
-        auto_stop_duration: 1800,     // For 30 minutes
+        auto_stop_enabled: false, // DISABLED - never auto-stop, just rotate IPs aggressively
+        auto_stop_threshold: 5.0,     // More lenient threshold (was 10%)
+        auto_stop_duration: 3600,     // 1 hour (was 30 minutes)
     };
     
     // Create proxy blacklist (5 min TTL)
@@ -2696,19 +2589,66 @@ async fn main() -> Result<()> {
         shutdown: AtomicBool::new(false),
     });
     
-    // Start proxy refresh task
-    let state_refresh = state.clone();
-    let stats_refresh = stats.clone();
-    let refresh_mins = state.config.refresh_mins;
-    let quiet = state.config.quiet;
-    tokio::spawn(async move {
-        loop {
-            sleep(Duration::from_secs(refresh_mins * 60)).await;
-            if state_refresh.shutdown.load(Ordering::Relaxed) {
-                break;
+    // Start background proxy manager (continuous refresh every 2 minutes)
+    let pool_for_bg = state.proxies.clone();
+    let stats_for_bg = stats.clone();
+    let shutdown_for_bg = Arc::new(state.shutdown.load(Ordering::Relaxed));
+    tokio::spawn({
+        let pool = pool_for_bg;
+        let stats = stats_for_bg;
+        let state = state.clone();
+        async move {
+            // Create a proper shutdown Arc that we can check
+            loop {
+                sleep(Duration::from_secs(BACKGROUND_REFRESH_SECS)).await;
+                
+                if state.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+                
+                // Fetch new proxies in background (quietly)
+                let current_count = pool.len().await;
+                
+                // Only refresh if pool is getting low (< 500 proxies)
+                if current_count < 500 {
+                    println!("{}", format!("[⚡] Low proxy count ({}), refreshing...", current_count).yellow());
+                    
+                    // Quick refresh from top sources only
+                    let quick_sources = [
+                        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all",
+                        "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=socks5&timeout=5000&country=all",
+                        "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt",
+                        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt",
+                    ];
+                    
+                    let mut new_proxies = Vec::new();
+                    for url in quick_sources {
+                        if let Ok(resp) = reqwest::get(url).await {
+                            if let Ok(text) = resp.text().await {
+                                let ptype = if url.contains("socks5") { ProxyType::Socks5 } else { ProxyType::Http };
+                                for line in text.lines().take(100) {
+                                    let l = line.trim();
+                                    if !l.is_empty() && l.contains(':') && l.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                                        if let Some(validated) = quick_validate_proxy(l, ptype).await {
+                                            new_proxies.push(validated);
+                                            if new_proxies.len() >= 100 {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !new_proxies.is_empty() {
+                        let count = new_proxies.len();
+                        pool.add_bulk(new_proxies).await;
+                        stats.validated.fetch_add(count as u64, Ordering::Relaxed);
+                        println!("{}", format!("[⚡] Added {} fresh proxies to pool (total: {})", count, pool.len().await).green());
+                    }
+                }
             }
-            let new = fetch_and_validate_proxies(stats_refresh.clone(), quiet).await;
-            state_refresh.proxies.add_bulk(new).await;
         }
     });
     
